@@ -21,7 +21,7 @@ if "posts_df" not in st.session_state:
 # ==========================
 # Fake Streaming (Demo Mode)
 # ==========================
-def demo_post(tag):
+def demo_post(tag: str) -> str:
     demos = [
         f"Absolutely loving AI today! Best decision ever ❤️ #{tag}",
         f"Team AI all the way! Who's with me? 💪 #{tag}",
@@ -36,9 +36,9 @@ def demo_post(tag):
 # Clean Text
 # ==========================
 def clean_text(txt: str) -> str:
-    txt = re.sub(r"http\\S+", "", txt)
-    txt = re.sub(r"@\\w+", "", txt)
-    txt = re.sub(r"#\\w+", "", txt)
+    txt = re.sub(r"http\S+", "", txt)
+    txt = re.sub(r"@\w+", "", txt)
+    txt = re.sub(r"#\w+", "", txt)
     return txt.strip()
 
 # ==========================
@@ -83,8 +83,10 @@ def classify_texts(texts: List[str], pipe, id2label):
 
 def numeric_score(r):
     l = r["label"].upper()
-    if "POS" in l: return r["score"]
-    if "NEG" in l: return -r["score"]
+    if "POS" in l: 
+        return r["score"]
+    if "NEG" in l: 
+        return -r["score"]
     return 0.0
 
 # ==========================
