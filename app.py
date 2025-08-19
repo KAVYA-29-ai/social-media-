@@ -1,19 +1,54 @@
 # app.py
+# 🚀 Social Media Sentiment Analyzer — improved
+# - Robust Hugging Face scoring (fixes all-NEUTRAL/0.00)
+# - Works in Demo without keys
+# - Optional Gemini insights (auto-fallback, never blocks UI)
+# - Optional Twitter (if TWITTER_BEARER_TOKEN available)
+# - Neon dark UI, responsive charts, safe caching
+
 import os
 import time
 import random
 import re
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, timezone
+from typing import List, Optional, Dict, Any
 
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import requests
-import tweepy
-from transformers import pipeline
-import torch
+
+# -------------------------
+# Optional deps (tweepy, torch, transformers)
+# -------------------------
+try:
+    import tweepy  # type: ignore
+except Exception:  # pragma: no cover
+    tweepy = None
+
+try:
+    import torch  # type: ignore
+except Exception:  # pragma: no cover
+    class _TorchStub:
+        @staticmethod
+        def cuda():
+            class _Cuda:
+                @staticmethod
+                def is_available():
+                    return False
+            return _Cuda()
+    torch = _TorchStub()
+
+try:
+    from transformers import (
+        AutoTokenizer,
+        AutoModelForSequenceClassification,
+        pipeline as hf_pipeline,
+    )  # type: ignore
+except Exception as e:  # pragma: no cover
+    st.error("Transformers not installed. Add `transformers` to requirements.txt.")
+    raise
 
 # ==========================
 # Page config & CSS
@@ -25,45 +60,49 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom dark/neon CSS
 st.markdown(
-    """
+    r"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap');
 
+:root {
+  --fg: #ffffff;
+  --muted: #b9b9b9;
+  --glass: rgba(255,255,255,0.06);
+  --border: rgba(255,255,255,0.10);
+  --pos: #00ff41;
+  --neu: #ffd700;
+  --neg: #ff4757;
+}
+
 .stApp {
-    background: linear-gradient(45deg, #0a0a0a, #1a1a2e, #16213e);
-    background-size: 400% 400%;
-    animation: gradientShift 12s ease infinite;
-    color: #fff;
+  background: radial-gradient(1200px 600px at 20% -10%, #1b1b2f 0%, #0b0b13 45%),
+              radial-gradient(900px 500px at 120% 10%, #182848 0%, transparent 60%),
+              linear-gradient(180deg, #0a0a0a 0%, #0a0a0a 100%);
+  color: var(--fg);
 }
-@keyframes gradientShift {
-    0% { background-position: 0% 50%; }
-    50% { background-position: 100% 50%; }
-    100% { background-position: 0% 50%; }
-}
+
 .main-header {
-    font-family: 'Orbitron', monospace;
-    font-size: 2.6rem;
-    font-weight: 900;
-    text-align: center;
-    background: linear-gradient(45deg, #00f5ff, #ff00ff, #00ff41);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    margin-bottom: 1rem;
-    text-shadow: 0 0 20px rgba(0,245,255,0.08);
+  font-family: 'Orbitron', monospace;
+  font-size: 2.6rem;
+  font-weight: 900;
+  text-align: center;
+  background: linear-gradient(45deg, #00f5ff, #ff00ff, #00ff41);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: .4rem;
+  text-shadow: 0 0 20px rgba(0,245,255,0.08);
 }
-.metric-card {
-    background: rgba(255,255,255,0.03);
-    border-radius: 12px;
-    padding: 14px;
-    margin: 6px;
-    border: 1px solid rgba(255,255,255,0.06);
-}
-.status-badge { display:inline-block; padding:6px 12px; border-radius:18px; font-weight:700; }
-.status-live { background: linear-gradient(45deg,#00ff41,#00cc33); color:#000; }
-.status-demo { background: linear-gradient(45deg,#ff6b35,#f7941d); color:#000; }
-.small { opacity:0.8; font-size:0.9rem; }
+.small { opacity: 0.85; font-size: 0.95rem; text-align:center; margin-bottom: 10px; }
+.card { background: var(--glass); border: 1px solid var(--border); border-radius: 14px; padding: 12px; }
+.badge { display:inline-block; padding:6px 12px; border-radius:18px; font-weight:700; }
+.badge-live { background: linear-gradient(45deg,#00ff41,#00cc33); color:#000; }
+.badge-demo { background: linear-gradient(45deg,#ff6b35,#f7941d); color:#000; }
+.badge-stop { background: #666; color:#fff; }
+.kpi { background: var(--glass); border:1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+.kpi h3 { margin: 0 0 4px 0; font-size: 0.9rem; font-weight: 700; color: var(--muted); }
+.kpi .v { font-size: 1.4rem; font-weight: 800; }
+.post { background: var(--glass); border:1px solid var(--border); border-radius: 12px; padding: 12px; margin: 8px 0; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -72,62 +111,65 @@ st.markdown(
 # ==========================
 # Utility / session helpers
 # ==========================
+
 def init_session_state():
-    """Initialize session state variables used across the app."""
     defaults = {
         "running": False,
-        "posts_df": pd.DataFrame(columns=["timestamp", "text", "sentiment", "score", "hashtag", "source"]),
+        "posts_df": pd.DataFrame(columns=["timestamp", "text", "sentiment", "score", "source", "hashtag"]),
+        "last_fetch": datetime.now(timezone.utc),
         "tweet_count": 0,
-        "last_update": datetime.utcnow(),
         "last_error": None,
-        "last_error_time": None,
+        "last_error_when": None,
         "gemini_cache": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
+
 def set_last_error(exc: Exception, where: str = ""):
-    """Store last error in session state with readable message and timestamp."""
     msg = f"{where}: {type(exc).__name__}: {str(exc)}"
     st.session_state.last_error = msg
-    st.session_state.last_error_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    # Also log to Streamlit's logger (helpful for spaces logs)
+    st.session_state.last_error_when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     st.error(f"Error — {msg}")
+
 
 init_session_state()
 
 # ==========================
-# Model loading (cached)
+# Model loading (robust)
 # ==========================
-@st.cache_resource
-def load_sentiment_model():
-    """Load the HF transformers sentiment pipeline with safe device selection."""
-    try:
-        device = 0 if torch.cuda.is_available() else -1
-        # Use cardiffnlp twitter-roberta sentiment model (free)
-        model = pipeline(
-            "sentiment-analysis",
-            model="cardiffnlp/twitter-roberta-base-sentiment-latest",
-            tokenizer="cardiffnlp/twitter-roberta-base-sentiment-latest",
-            device=device,
-            truncation=True,
-            top_k=None,
-        )
-        return model
-    except Exception as e:
-        # Pass exception upstream
-        raise RuntimeError(f"Failed to load sentiment model: {e}")
+
+MODEL_NAME = os.getenv("HF_MODEL", "cardiffnlp/twitter-roberta-base-sentiment-latest")
+
+@st.cache_resource(show_spinner=True)
+def load_hf_pipeline():
+    """Build a transformers pipeline that returns full class scores
+    and exposes id2label for correct mapping. Fixes NEUTRAL/0.00 bug.
+    """
+    device = 0 if hasattr(torch, "cuda") and torch.cuda.is_available() else -1
+    tok = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+    mdl = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
+    pipe = hf_pipeline(
+        "text-classification",
+        model=mdl,
+        tokenizer=tok,
+        truncation=True,
+        return_all_scores=True,  # IMPORTANT — get all classes
+        device=device,
+    )
+    id2label = mdl.config.id2label
+    return pipe, id2label
+
 
 # ==========================
 # Text cleaning utilities
 # ==========================
 URL_RE = re.compile(r"https?://\S+|www\.\S+")
 MENTION_RE = re.compile(r"@\w+")
-HASHTAG_RE = re.compile(r"#(\w+)")
+
 
 def clean_text(text: str) -> str:
-    """Remove URLs, mentions and excess whitespace for model input."""
     if not text:
         return ""
     t = URL_RE.sub("", text)
@@ -136,203 +178,225 @@ def clean_text(text: str) -> str:
     t = " ".join(t.split())
     return t
 
-# ==========================
-# Sentiment helper
-# ==========================
-LABEL_MAP = {
-    # cardiffnlp uses LABEL_0, LABEL_1, LABEL_2 -> map accordingly
-    "LABEL_0": "NEGATIVE",
-    "LABEL_1": "NEUTRAL",
-    "LABEL_2": "POSITIVE",
-    "NEGATIVE": "NEGATIVE",
-    "NEUTRAL": "NEUTRAL",
-    "POSITIVE": "POSITIVE",
-}
-
-def analyze_sentiment(text: str, model) -> (str, float):
-    """Return (sentiment_label, confidence_score). Handles model label formats robustly."""
-    try:
-        if model is None:
-            raise RuntimeError("Sentiment model not available")
-        cleaned = clean_text(text)
-        if not cleaned:
-            return "NEUTRAL", 0.0
-        out = model(cleaned)[0]
-        raw_label = out.get("label") or out.get("result") or ""
-        score = float(out.get("score", 0.0))
-        label = LABEL_MAP.get(raw_label.upper(), "NEUTRAL")
-        return label, score
-    except Exception as e:
-        set_last_error(e, "analyze_sentiment")
-        return "NEUTRAL", 0.0
 
 # ==========================
-# Demo synthetic stream
+# Sentiment helper (robust mapping + softmax guard)
 # ==========================
-def generate_demo_post(hashtag: str) -> str:
-    """Return a plausible demo social post for given hashtag."""
-    try:
-        templates = [
-            f"Just tried the new {hashtag} experience — wow, I'm impressed! 🔥",
-            f"Not sure about #{hashtag}, feels overhyped... 🤔",
-            f"Absolutely loving {hashtag} today! Best decision ever ❤️",
-            f"{hashtag} disappointed me. Expected more. 😞",
-            f"The {hashtag} community is so supportive! 🌟",
-            f"Why is everyone talking about {hashtag}? It's okay I guess.",
-            f"{hashtag} changed my workflow completely. Mind blown 🤯",
-            f"Can't stop thinking about {hashtag} — life improved 🙏",
-            f"Tried {hashtag} — neutral feelings overall.",
-            f"Big updates for {hashtag} — looks promising ✨",
-            f"I hate the new {hashtag} change. Very buggy 😤",
-            f"Team {hashtag} all the way! Who's with me? 💪",
-            f"Confused about the {hashtag} hype. Explain? 📣",
-            f"Perfect {hashtag} moment today! Feeling grateful 😊",
-        ]
-        return random.choice(templates)
-    except Exception as e:
-        set_last_error(e, "generate_demo_post")
-        # Fallback minimal text
-        return f"{hashtag} demo post"
+
+import numpy as _np
+
+def _softmax(x):
+    x = _np.array(x, dtype=_np.float64)
+    x = x - _np.max(x)
+    ex = _np.exp(x)
+    return (ex / _np.sum(ex)).tolist()
+
+
+def classify_texts(texts: List[str], pipe, id2label: Dict[int, str]) -> List[Dict[str, Any]]:
+    """Return list of {label, score, probs} per text.
+    - Uses id2label to map LABEL_i → correct names
+    - Applies softmax if scores don't sum ~1.0
+    - Picks argmax class
+    """
+    if not texts:
+        return []
+    raw = pipe(texts)  # list[list[{label, score}...]]
+    out = []
+    for item in raw:
+        labs, probs = [], []
+        for d in item:
+            lab = d.get("label", "").upper()
+            if lab.startswith("LABEL_"):
+                try:
+                    idx = int(lab.split("_")[1])
+                    lab = id2label.get(idx, lab)
+                except Exception:
+                    pass
+            lab = lab.lower()
+            labs.append(lab)
+            probs.append(float(d.get("score", 0.0)))
+        s = sum(probs)
+        if not (0.99 <= s <= 1.01):  # guard if logits leaked
+            probs = _softmax(probs)
+        by = {labs[i]: probs[i] for i in range(len(labs))}
+        neg = by.get("negative", by.get("neg", 0.0))
+        neu = by.get("neutral", by.get("neu", 0.0))
+        pos = by.get("positive", by.get("pos", 0.0))
+        triplet = {"negative": neg, "neutral": neu, "positive": pos}
+        top = max(triplet, key=triplet.get)
+        out.append({
+            "label": top.upper(),
+            "score": float(triplet[top]),
+            "probs": triplet,
+        })
+    return out
+
+
+def numeric_score(row: Dict[str, Any]) -> float:
+    lab = (row.get("label") or "").upper()
+    p = row.get("probs", {})
+    if lab == "POSITIVE":
+        return float(p.get("positive", row.get("score", 0.0)))
+    if lab == "NEGATIVE":
+        return -float(p.get("negative", row.get("score", 0.0)))
+    return 0.0
+
+
+# ==========================
+# Demo synthetic posts
+# ==========================
+
+def demo_post(tag: str) -> str:
+    templates = [
+        f"Just tried {tag} — impressed! 🔥",
+        f"Not sure about #{tag}, kinda overhyped 🤔",
+        f"Absolutely loving {tag}! Best decision ❤️",
+        f"{tag} disappointed me. Expected more. 😞",
+        f"The {tag} community is so supportive! 🌟",
+        f"Why is everyone talking about {tag}? It's okay I guess.",
+        f"{tag} changed my workflow. Mind blown 🤯",
+        f"Can't stop thinking about {tag} — life improved 🙏",
+        f"Tried {tag} — neutral feelings overall.",
+        f"Big updates for {tag} — promising ✨",
+        f"I hate the new {tag} change. Very buggy 😤",
+        f"Team {tag} all the way! Who's with me? 💪",
+    ]
+    return random.choice(templates)
+
 
 # ==========================
 # Twitter helper (optional)
 # ==========================
-def setup_twitter_client() -> Optional[tweepy.Client]:
-    """Return a tweepy.Client if TWITTER_BEARER_TOKEN is set and works, else None."""
-    bearer = os.getenv("TWITTER_BEARER_TOKEN")
-    if not bearer:
+
+def setup_twitter_client() -> Optional["tweepy.Client"]:
+    if not tweepy:
+        return None
+    token = os.getenv("TWITTER_BEARER_TOKEN")
+    if not token:
         return None
     try:
-        client = tweepy.Client(bearer_token=bearer, wait_on_rate_limit=True)
-        # test call
-        try:
-            client.get_me()
-        except Exception:
-            # some tokens might not allow get_me; ignore if search works later
-            pass
+        client = tweepy.Client(bearer_token=token, wait_on_rate_limit=True)
         return client
     except Exception as e:
         set_last_error(e, "setup_twitter_client")
         return None
 
-def fetch_tweets(client: tweepy.Client, hashtag: str, max_results: int = 10) -> List[str]:
-    """Fetch recent tweets for a hashtag. Returns list of texts. Handles errors gracefully."""
+
+def fetch_tweets(client: "tweepy.Client", hashtag: str, n: int = 10) -> List[str]:
+    if not client:
+        return []
     try:
-        if client is None:
-            return []
-        query = f"#{hashtag} -is:retweet lang:en"
-        resp = client.search_recent_tweets(query=query, max_results=min(max_results, 100),
-                                          tweet_fields=["created_at", "text"])
-        tweets = []
-        if resp and getattr(resp, "data", None):
-            for t in resp.data:
-                tweets.append(t.text)
-        return tweets
+        q = f"#{hashtag} -is:retweet lang:en"
+        resp = client.search_recent_tweets(query=q, max_results=min(n, 100), tweet_fields=["created_at", "text"])
+        texts = [t.text for t in (getattr(resp, "data", []) or [])]
+        return texts
     except Exception as e:
         set_last_error(e, "fetch_tweets")
         return []
 
-# ==========================
-# Gemini (Google AI Studio) helper
-# ==========================
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
-def gemini_generate(prompt: str, timeout: int = 20) -> str:
-    """Call Google Generative Language API (Gemini). Returns text or readable error message."""
+# ==========================
+# Gemini helper (optional)
+# ==========================
+GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+
+def gemini_insights(posts: pd.DataFrame, hashtag: str) -> Optional[str]:
     if not GEMINI_KEY:
-        return "⚠️ No GEMINI_API_KEY set. Enable in your Space secrets to use Gemini."
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-    headers = {"Content-Type": "application/json", "X-goog-api-key": GEMINI_KEY}
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        return None
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        if resp.status_code != 200:
-            # Save error for debugging
-            set_last_error(RuntimeError(f"Gemini status {resp.status_code}: {resp.text}"), "gemini_generate")
-            return f"⚠️ Gemini API error (status {resp.status_code}). See 'Last Error' panel."
-        data = resp.json()
-        # Defensive access: follow structure generative responses use
-        try:
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
-            return text
-        except Exception:
-            # Fallback to top-level textual fields if present
-            txt = str(data)
-            set_last_error(RuntimeError("Unexpected Gemini response shape"), "gemini_generate")
-            return f"⚠️ Gemini response parsing failed. Raw: {txt[:500]}"
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        headers = {"Content-Type": "application/json", "X-goog-api-key": GEMINI_KEY}
+        sample = posts.tail(20)["text"].tolist()
+        prompt = (
+            "You are a product analyst. In <= 40 words, give 3 crisp bullet insights about overall sentiment and themes for posts "
+            f"about #{hashtag}. No emojis, no hashtags.\n\nSample posts (newest last):\n" + "\n".join(sample)
+        )
+        payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.4, "maxOutputTokens": 120}}
+        r = requests.post(url, headers=headers, json=payload, timeout=15)
+        if r.status_code != 200:
+            set_last_error(RuntimeError(f"Gemini {r.status_code}: {r.text[:200]}"), "gemini_insights")
+            return None
+        data = r.json()
+        return (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+            .strip()
+            or None
+        )
     except Exception as e:
-        set_last_error(e, "gemini_generate")
-        return "⚠️ Gemini request failed. See 'Last Error' panel."
+        set_last_error(e, "gemini_insights")
+        return None
+
 
 # ==========================
-# App main UI & logic
+# Main App
 # ==========================
+
 def main():
-    # Header
     st.markdown('<div class="main-header">🚀 Social Media Sentiment Analyzer</div>', unsafe_allow_html=True)
-    st.markdown("<div class='small' style='text-align:center;margin-bottom:18px;'>Hugging Face sentiment + optional Gemini insights • Demo mode works without keys</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='small'>Hugging Face sentiment + optional Gemini insights • Demo works without keys</div>",
+        unsafe_allow_html=True,
+    )
 
-    # Load model with clear error feedback
-    model = None
-    try:
-        with st.spinner("Loading sentiment model (cached)..."):
-            model = load_sentiment_model()
-    except Exception as e:
-        set_last_error(e, "load_sentiment_model")
-        st.sidebar.error("Failed to load sentiment model. Check logs. App will run in demo-only mode.")
-        model = None
-
-    # Sidebar controls
+    # Sidebar
     st.sidebar.title("🎛️ Control Panel")
-    twitter_client = setup_twitter_client()
-    has_twitter = twitter_client is not None
-    mode_options = ["Auto (Prefer Live)", "Force Live", "Force Demo"] if has_twitter else ["Demo Mode Only"]
-    mode = st.sidebar.selectbox("🔧 Mode", mode_options, index=0)
     hashtag = st.sidebar.text_input("🏷️ Hashtag (no #)", value="AI", max_chars=64)
-    refresh_interval = st.sidebar.slider("⏱️ Refresh interval (seconds)", min_value=5, max_value=60, value=10, step=1)
-    window_size = st.sidebar.slider("📊 Rolling window size (posts)", min_value=10, max_value=500, value=100, step=10)
+    window_size = st.sidebar.slider("📊 Rolling window size (posts)", 10, 500, 100, step=10)
+    refresh = st.sidebar.slider("⏱️ Refresh interval (sec)", 5, 60, 10, 1)
 
-    # Gemini toggle
-    gemini_enabled = st.sidebar.checkbox("Enable Gemini Insights (optional)", value=False)
-    if gemini_enabled and not GEMINI_KEY:
-        st.sidebar.info("Add GEMINI_API_KEY to Space secrets to enable Gemini.")
+    twitter_client = setup_twitter_client()
+    live_available = twitter_client is not None
+    mode_opts = ["Auto (Prefer Live)", "Force Live", "Force Demo"] if live_available else ["Demo Mode Only"]
+    mode = st.sidebar.selectbox("🔧 Mode", mode_opts, index=0)
 
-    # Controls
+    use_gemini = st.sidebar.checkbox("Enable Gemini Insights", value=False)
+    if use_gemini and not GEMINI_KEY:
+        st.sidebar.info("Set GEMINI_API_KEY in your environment to enable insights.")
+
     c1, c2 = st.sidebar.columns(2)
-    if c1.button("▶ Start"):
+    start = c1.button("▶ Start")
+    stop = c2.button("⏹ Stop")
+    if start:
         st.session_state.running = True
         st.balloons()
-    if c2.button("⏹ Stop"):
+    if stop:
         st.session_state.running = False
 
     if st.sidebar.button("🗑 Clear data"):
-        st.session_state.posts_df = pd.DataFrame(columns=["timestamp", "text", "sentiment", "score", "hashtag", "source"])
+        st.session_state.posts_df = pd.DataFrame(columns=["timestamp", "text", "sentiment", "score", "source", "hashtag"])
         st.session_state.tweet_count = 0
-        st.session_state.last_update = datetime.utcnow()
+        st.session_state.last_fetch = datetime.now(timezone.utc)
+        st.session_state.gemini_cache = None
         st.experimental_rerun()
 
-    # Status
+    # Status badge
     if st.session_state.running:
-        if mode == "Force Demo" or (mode == "Auto (Prefer Live)" and not has_twitter):
-            st.sidebar.markdown('<div class="status-badge status-demo">🎭 DEMO MODE</div>', unsafe_allow_html=True)
+        if (mode == "Force Demo") or (mode == "Auto (Prefer Live)" and not live_available):
+            st.sidebar.markdown('<span class="badge badge-demo">🎭 DEMO MODE</span>', unsafe_allow_html=True)
         else:
-            st.sidebar.markdown('<div class="status-badge status-live">📡 LIVE MODE</div>', unsafe_allow_html=True)
+            st.sidebar.markdown('<span class="badge badge-live">📡 LIVE MODE</span>', unsafe_allow_html=True)
     else:
-        st.sidebar.markdown('<div class="status-badge" style="background:#666;color:#fff;">⏸ STOPPED</div>', unsafe_allow_html=True)
+        st.sidebar.markdown('<span class="badge badge-stop">⏸ STOPPED</span>', unsafe_allow_html=True)
 
-    # Display last error (if any)
+    # Last error panel
     if st.session_state.last_error:
         with st.expander("⚠️ Last Error (click to inspect)"):
             st.write(st.session_state.last_error)
-            st.write("Occurred at:", st.session_state.last_error_time)
+            st.write("When:", st.session_state.last_error_when)
 
-    # Main content area: KPIs and charts
-    st.markdown("## Dashboard")
-    df = st.session_state.posts_df
+    # Load model once
+    try:
+        (pipe, id2label) = load_hf_pipeline()
+    except Exception as e:
+        set_last_error(e, "load_hf_pipeline")
+        pipe, id2label = None, {}
 
-    # If running, fetch posts periodically
-    def fetch_and_process_posts():
-        """Fetch posts from live or demo, analyze sentiment, and append to session state."""
+    # Fetch cycle
+    def fetch_cycle():
         try:
             use_live = False
             if mode == "Force Live":
@@ -340,185 +404,186 @@ def main():
             elif mode == "Force Demo":
                 use_live = False
             else:  # Auto
-                use_live = has_twitter
+                use_live = live_available
 
-            posts = []
-            source_tag = "demo"
+            texts: List[str] = []
+            source = "demo"
+            tag = hashtag
             if use_live and twitter_client:
-                fetched = fetch_tweets(twitter_client, hashtag, max_results=5)
-                if fetched:
-                    posts = fetched
-                    source_tag = "twitter"
-                else:
-                    # fallback to demo if live fetch returns none
-                    posts = [generate_demo_post(hashtag) for _ in range(3)]
-                    source_tag = "demo"
-            else:
-                posts = [generate_demo_post(hashtag) for _ in range(3)]
-                source_tag = "demo"
+                texts = fetch_tweets(twitter_client, tag, n=6) or []
+                source = "twitter" if texts else "demo"
+            if not texts:
+                texts = [demo_post(tag) for _ in range(4)]
+                source = "demo"
 
-            rows = []
-            for p in posts:
-                try:
-                    label, confidence = analyze_sentiment(p, model)
-                except Exception as e:
-                    set_last_error(e, "per-post analyze_sentiment")
-                    label, confidence = "NEUTRAL", 0.0
-                score = confidence if label == "POSITIVE" else (-confidence if label == "NEGATIVE" else 0.0)
-                rows.append({
-                    "timestamp": datetime.utcnow(),
-                    "text": p,
-                    "sentiment": label,
-                    "score": score,
-                    "hashtag": hashtag,
-                    "source": source_tag,
-                })
+            if not pipe:
+                # If model not loaded, still push rows with neutral 0.0 so UI runs
+                rows = [{
+                    "timestamp": datetime.now(timezone.utc),
+                    "text": t,
+                    "sentiment": "NEUTRAL",
+                    "score": 0.0,
+                    "source": source,
+                    "hashtag": tag,
+                } for t in texts]
+            else:
+                cleaned = [clean_text(t) for t in texts]
+                results = classify_texts(cleaned, pipe, id2label)
+                rows = []
+                for t, r in zip(texts, results):
+                    ns = numeric_score(r)
+                    rows.append({
+                        "timestamp": datetime.now(timezone.utc),
+                        "text": t,
+                        "sentiment": r["label"],
+                        "score": ns,
+                        "source": source,
+                        "hashtag": tag,
+                    })
 
             if rows:
                 new_df = pd.DataFrame(rows)
-                combined = pd.concat([st.session_state.posts_df, new_df], ignore_index=True)
-                # Trim to rolling window
-                if len(combined) > window_size:
-                    combined = combined.tail(window_size).reset_index(drop=True)
-                st.session_state.posts_df = combined
-                st.session_state.tweet_count += len(new_df)
-                st.session_state.last_update = datetime.utcnow()
+                df = pd.concat([st.session_state.posts_df, new_df], ignore_index=True)
+                if len(df) > window_size:
+                    df = df.tail(window_size).reset_index(drop=True)
+                st.session_state.posts_df = df
+                st.session_state.tweet_count += len(rows)
+                st.session_state.last_fetch = datetime.now(timezone.utc)
         except Exception as e:
-            set_last_error(e, "fetch_and_process_posts")
+            set_last_error(e, "fetch_cycle")
 
-    # If running, check timing and possibly fetch
     if st.session_state.running:
-        time_since = (datetime.utcnow() - st.session_state.last_update).total_seconds()
-        if time_since >= refresh_interval:
-            fetch_and_process_posts()
-            # After fetching, optionally request Gemini summary if enabled
-            if gemini_enabled and len(st.session_state.posts_df) > 0:
+        delta = (datetime.now(timezone.utc) - st.session_state.last_fetch).total_seconds()
+        if delta >= refresh:
+            fetch_cycle()
+            # Gemini async-ish cache update
+            if use_gemini and len(st.session_state.posts_df) > 0:
                 try:
-                    # Create condensed prompt (last N small posts)
-                    tail_texts = st.session_state.posts_df.tail(20)["text"].tolist()
-                    joined = "\n".join(tail_texts)
-                    prompt = f"Summarize overall sentiment and key themes for posts about #{hashtag}:\n\n{joined}"
-                    gemini_result = gemini_generate(prompt)
-                    st.session_state.gemini_cache = gemini_result
+                    insight = gemini_insights(st.session_state.posts_df, hashtag)
+                    st.session_state.gemini_cache = insight
                 except Exception as e:
-                    set_last_error(e, "gemini_integration")
-            # Rerun to update UI immediately
+                    set_last_error(e, "gemini_cache")
             st.experimental_rerun()
 
-    # KPI metrics
-    if len(df) > 0:
-        total = len(df)
-        counts = df["sentiment"].value_counts().to_dict()
-        pos_pct = (counts.get("POSITIVE", 0) / total) * 100
-        neu_pct = (counts.get("NEUTRAL", 0) / total) * 100
-        neg_pct = (counts.get("NEGATIVE", 0) / total) * 100
+    # ================= UI: Dashboard =================
+    st.markdown("## Dashboard")
+    df = st.session_state.posts_df
 
-        # Layout metrics
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("📈 Total Posts (window)", f"{total:,}")
-        m2.metric("😊 Positive", f"{pos_pct:.1f}%")
-        m3.metric("😐 Neutral", f"{neu_pct:.1f}%")
-        m4.metric("☹️ Negative", f"{neg_pct:.1f}%")
-
-        # Charts
-        left_col, right_col = st.columns([2, 1])
-        with left_col:
-            st.markdown("### 📈 Sentiment Over Time")
-            if total > 1:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=df["timestamp"],
-                    y=df["score"],
-                    mode="lines+markers",
-                    name="score",
-                    line=dict(color="#00f5ff", width=2),
-                    marker=dict(size=6),
-                ))
-                fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.2)")
-                fig.update_layout(
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    yaxis=dict(range=[-1, 1], title="Sentiment Score"),
-                    xaxis=dict(title="Time"),
-                    height=420,
-                    showlegend=False,
-                    margin=dict(l=20, r=20, t=40, b=20)
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("Not enough data yet to show time series. Start streaming to populate data.")
-
-        with right_col:
-            st.markdown("### 🍩 Sentiment Distribution")
-            labels = ["Positive", "Neutral", "Negative"]
-            vals = [pos_pct, neu_pct, neg_pct]
-            fig2 = go.Figure(data=[go.Pie(labels=labels, values=vals, hole=0.6)])
-            fig2.update_traces(textinfo="percent+label")
-            fig2.update_layout(
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                height=420,
-                margin=dict(l=10, r=10, t=40, b=10),
-                showlegend=False
-            )
-            st.plotly_chart(fig2, use_container_width=True)
-
-        # Recent posts
-        st.markdown("### 💬 Recent Posts")
-        recent = df.tail(10).sort_values("timestamp", ascending=False)
-        for _, row in recent.iterrows():
-            color = "#00ff41" if row["sentiment"] == "POSITIVE" else ("#ffd700" if row["sentiment"] == "NEUTRAL" else "#ff4757")
-            ts = row["timestamp"].strftime("%Y-%m-%d %H:%M:%S")
-            text_preview = row["text"]
-            st.markdown(
-                f"""
-                <div style="background:rgba(255,255,255,0.03);border-radius:10px;padding:12px;margin:8px 0;border-left:4px solid {color}">
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-                        <div style="font-weight:700;color:{color}">{row['sentiment']} ({row['score']:.2f})</div>
-                        <div style="color:#bbb;font-size:0.85rem">{ts} • {row.get('source','')}</div>
-                    </div>
-                    <div style="color:#fff;">{text_preview}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    else:
-        # Empty state prompt
+    if len(df) == 0:
         st.markdown(
             """
-            <div style="text-align:center;padding:40px;">
-                <h3 style="color:#00f5ff">🎯 Ready to analyze!</h3>
-                <p style="color:#ccc">Configure hashtag, choose a mode, and click ▶ Start to stream demo or live posts.</p>
+            <div class="card" style="text-align:center;padding:28px;">
+              <h3 style="margin:0 0 6px 0;">🎯 Ready to analyze!</h3>
+              <div class="small">Set a hashtag, choose a mode, and click ▶ Start.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    # KPIs
+    total = len(df)
+    counts = df["sentiment"].value_counts().to_dict()
+    pos = counts.get("POSITIVE", 0)
+    neu = counts.get("NEUTRAL", 0)
+    neg = counts.get("NEGATIVE", 0)
+    pos_pct = (pos / total) * 100
+    neu_pct = (neu / total) * 100
+    neg_pct = (neg / total) * 100
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.markdown(f"<div class='kpi'><h3>📈 Total Posts (window)</h3><div class='v'>{total:,}</div></div>", unsafe_allow_html=True)
+    with k2:
+        st.markdown(f"<div class='kpi'><h3>😊 Positive</h3><div class='v'>{pos_pct:.1f}%</div></div>", unsafe_allow_html=True)
+    with k3:
+        st.markdown(f"<div class='kpi'><h3>😐 Neutral</h3><div class='v'>{neu_pct:.1f}%</div></div>", unsafe_allow_html=True)
+    with k4:
+        st.markdown(f"<div class='kpi'><h3>☹️ Negative</h3><div class='v'>{neg_pct:.1f}%</div></div>", unsafe_allow_html=True)
+
+    # Charts
+    left, right = st.columns([2, 1])
+    with left:
+        st.markdown("### 📈 Sentiment Over Time")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df["timestamp"],
+            y=df["score"],
+            mode="lines+markers",
+            name="score",
+            line=dict(width=2),
+            marker=dict(size=6),
+        ))
+        fig.add_hline(y=0, line_dash="dash")
+        fig.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(range=[-1, 1], title="Sentiment Score"),
+            xaxis=dict(title="Time"),
+            height=420,
+            showlegend=False,
+            margin=dict(l=20, r=20, t=40, b=20),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with right:
+        st.markdown("### 🍩 Sentiment Distribution")
+        labels = ["Positive", "Neutral", "Negative"]
+        values = [pos, neu, neg]
+        fig2 = go.Figure(data=[go.Pie(labels=labels, values=values, hole=0.55)])
+        fig2.update_traces(textinfo="percent+label")
+        fig2.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            height=420,
+            margin=dict(l=10, r=10, t=40, b=10),
+            showlegend=False,
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # Recent posts
+    st.markdown("### 💬 Recent Posts")
+    recent = df.tail(12).sort_values("timestamp", ascending=False)
+    for _idx, row in recent.iterrows():
+        color = "var(--pos)" if row["sentiment"] == "POSITIVE" else ("var(--neu)" if row["sentiment"] == "NEUTRAL" else "var(--neg)")
+        ts = pd.to_datetime(row["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+        st.markdown(
+            f"""
+            <div class='post' style='border-left:4px solid {color}'>
+              <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px'>
+                <div style='font-weight:800;color:{color}'>{row['sentiment']} ({row['score']:.2f})</div>
+                <div style='color:#bbb;font-size:0.85rem'>{ts} • {row.get('source','')}</div>
+              </div>
+              <div style='color:#fff'>{row['text']}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    # Gemini insights panel (cached result displayed)
-    if gemini_enabled:
+    # Gemini panel
+    if use_gemini:
         st.markdown("### 🤖 Gemini Insights (optional)")
         if st.session_state.gemini_cache:
             st.info(st.session_state.gemini_cache)
         elif not GEMINI_KEY:
-            st.warning("GEMINI_API_KEY is not set. Add it to Space secrets to enable insights.")
-        elif len(st.session_state.posts_df) == 0:
-            st.write("No posts yet — start streaming to get Gemini insights.")
+            st.warning("GEMINI_API_KEY not set. Add it to your environment to enable insights.")
         else:
-            st.write("Gemini will generate a short summary after the next fetch interval.")
+            st.caption("Insights will appear after the next fetch cycle…")
 
-    # Footer debug / controls
-    footer_col1, footer_col2 = st.columns([3, 1])
-    with footer_col1:
-        st.markdown("<div class='small'>Tip: Demo mode is safe for classroom demos. Add TWITTER_BEARER_TOKEN and/or GEMINI_API_KEY as Space secrets to enable live/insights.</div>", unsafe_allow_html=True)
-    with footer_col2:
-        st.markdown("<div class='small' style='text-align:right'>Total fetched: <b>{:,}</b></div>".format(st.session_state.tweet_count), unsafe_allow_html=True)
+    # Footer
+    f1, f2 = st.columns([3, 1])
+    with f1:
+        st.markdown("<div class='small'>Tip: Demo mode is safe for showcases. Add TWITTER_BEARER_TOKEN / GEMINI_API_KEY for live & insights.</div>", unsafe_allow_html=True)
+    with f2:
+        st.markdown(
+            f"<div class='small' style='text-align:right'>Total fetched: <b>{st.session_state.tweet_count:,}</b></div>",
+            unsafe_allow_html=True,
+        )
 
-# Entrypoint
+
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        # Last-resort error capture
         set_last_error(e, "main")
         st.exception(e)
