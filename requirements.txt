@@ -1,5 +1,7 @@
-streamlit==1.36.0
-pandas==2.2.2
-plotly==5.22.0
-torch==2.2.2
-transformers==4.45.0
+flask
+flask-cors
+google-generativeai
+transformers
+torch
+pandas
+plotly
