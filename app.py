@@ -29,13 +29,16 @@ DEFAULT_POSTS = 20
 # -----------------------
 # Sentiment Analyzer (HF)
 # -----------------------
-# Pin a specific model for stability (avoid the production warning)
-SENTIMENT_MODEL = "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
-sentiment_analyzer = pipeline(
-    "sentiment-analysis",
-    model=SENTIMENT_MODEL,
-    device=-1  # CPU
-)
+SENTIMENT_MODEL = "distilbert-base-uncased-finetuned-sst-2-english"
+try:
+    sentiment_analyzer = pipeline(
+        "sentiment-analysis",
+        model=SENTIMENT_MODEL,
+        device=-1  # CPU
+    )
+except Exception as e:
+    print("Error initializing sentiment analyzer:", e)
+    sentiment_analyzer = None
 
 # -----------------------
 # Helpers
@@ -49,7 +52,6 @@ def normalize_count(n: int) -> int:
     return n
 
 def parse_sentiment(label: str, score: float) -> Dict[str, str]:
-    # Standardize to POSITIVE / NEGATIVE / NEUTRAL (distilbert gives POSITIVE/NEGATIVE)
     if label.upper() == "POSITIVE":
         sentiment = "POSITIVE"
     elif label.upper() == "NEGATIVE":
@@ -68,7 +70,6 @@ def compute_aggregate(rows: List[Dict]) -> Dict:
     neg_pct = round(100 * neg / total, 2)
     neu_pct = round(100 * neu / total, 2)
 
-    # Rolling sentiment (simple EMA-like)
     rolling = []
     score_map = {"POSITIVE": 1.0, "NEUTRAL": 0.5, "NEGATIVE": 0.0}
     alpha = 0.2
@@ -84,7 +85,7 @@ def compute_aggregate(rows: List[Dict]) -> Dict:
     }
 
 # -----------------------
-# Synthetic fallback posts (no external calls)
+# Fallback posts
 # -----------------------
 FALLBACK_PATTERNS_POS = [
     "Absolutely loving {tag} right now! 🔥",
@@ -123,10 +124,6 @@ def make_fallback_posts(hashtag: str, n: int) -> List[str]:
 # Gemini generation
 # -----------------------
 def generate_with_gemini(hashtag: str, n: int) -> List[str]:
-    """
-    Generate up to n short social posts using Gemini 2.0 Flash.
-    Returns list of strings. If API missing or error occurs, raises Exception.
-    """
     if not GOOGLE_API_KEY:
         raise RuntimeError("GOOGLE_API_KEY not set")
 
@@ -140,9 +137,8 @@ Rules:
 - One post per line.
 - Each post under 120 characters.
 - Use a mix of positive, neutral, and critical tones.
-- Avoid any hate speech, harassment, or slurs.
-- Do NOT include numbering like "1." or "-".
-- Do NOT wrap in code blocks.
+- Avoid hate speech or slurs.
+- Do NOT include numbering or code blocks.
 - Language: English.
 Output format:
 <post 1>
@@ -150,88 +146,84 @@ Output format:
 ...
 <post {n}>
 """
-
-    # Simple retry to avoid transient errors
     tries = 2
     for i in range(tries):
         try:
             r = model.generate_content(prompt)
             text = (r.text or "").strip()
-            if not text:
-                raise RuntimeError("Empty response from Gemini")
-
             lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-            # Keep only the first n lines; also handle if Gemini returns more or fewer lines
             if len(lines) < n:
-                # pad with fallback to hit n
                 lines += make_fallback_posts(hashtag, n - len(lines))
-            posts = lines[:n]
-            return posts
+            return lines[:n]
         except Exception as e:
+            print(f"Gemini generation attempt {i+1} failed:", e)
+            time.sleep(0.8)
             if i == tries - 1:
                 raise
-            time.sleep(0.8)  # brief backoff
 
 # -----------------------
 # API: analyze
-#   Request JSON:
-#     { "hashtag": "gla", "count": 30 }
 # -----------------------
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
-    data = request.get_json(silent=True) or {}
-    hashtag = (data.get("hashtag") or "").strip()
-    count = normalize_count(data.get("count") or DEFAULT_POSTS)
-
-    if not hashtag:
-        return jsonify({"error": "hashtag is required"}), 400
-
-    posts: List[Dict] = []
-    gemini_count = 0
-    fallback_count = 0
-
-    # Try Gemini first; if it fails, fall back fully.
     try:
-        gemini_posts = generate_with_gemini(hashtag, count)
-        for p in gemini_posts:
-            posts.append({"text": p, "source": "gemini"})
-        gemini_count = len(gemini_posts)
-    except Exception:
-        fb = make_fallback_posts(hashtag, count)
-        for p in fb:
-            posts.append({"text": p, "source": "fallback"})
-        fallback_count = len(fb)
+        data = request.get_json(silent=True) or {}
+        hashtag = (data.get("hashtag") or "").strip()
+        count = normalize_count(data.get("count") or DEFAULT_POSTS)
 
-    # Sentiment analysis
-    rows = []
-    for p in posts:
-        res = sentiment_analyzer(p["text"])[0]  # {'label': 'POSITIVE', 'score': 0.99}
-        parsed = parse_sentiment(res["label"], res["score"])
-        rows.append({
-            "text": p["text"],
-            "source": p["source"],
-            "sentiment": parsed["sentiment"],
-            "score": parsed["score"],
-        })
+        if not hashtag:
+            return jsonify({"error": "hashtag is required"}), 400
 
-    agg = compute_aggregate(rows)
+        posts: List[Dict] = []
+        gemini_count = 0
+        fallback_count = 0
 
-    return jsonify({
-        "meta": {
-            "hashtag": hashtag if hashtag.startswith("#") else f"#{hashtag}",
-            "requested": count,
-            "generated_by": {
-                "gemini": gemini_count,
-                "fallback": fallback_count
+        # Try Gemini first
+        try:
+            gemini_posts = generate_with_gemini(hashtag, count)
+            for p in gemini_posts:
+                posts.append({"text": p, "source": "gemini"})
+            gemini_count = len(gemini_posts)
+        except Exception:
+            fb = make_fallback_posts(hashtag, count)
+            for p in fb:
+                posts.append({"text": p, "source": "fallback"})
+            fallback_count = len(fb)
+
+        # Sentiment analysis
+        rows = []
+        for p in posts:
+            if sentiment_analyzer:
+                res = sentiment_analyzer(p["text"])[0]
+                parsed = parse_sentiment(res["label"], res["score"])
+            else:
+                parsed = {"sentiment": "NEUTRAL", "score": 0.5}
+            rows.append({
+                "text": p["text"],
+                "source": p["source"],
+                "sentiment": parsed["sentiment"],
+                "score": parsed["score"],
+            })
+
+        agg = compute_aggregate(rows)
+
+        return jsonify({
+            "meta": {
+                "hashtag": hashtag if hashtag.startswith("#") else f"#{hashtag}",
+                "requested": count,
+                "generated_by": {"gemini": gemini_count, "fallback": fallback_count},
+                "model": {
+                    "generation": "gemini-2.0-flash" if gemini_count > 0 else "fallback-templates",
+                    "sentiment": SENTIMENT_MODEL
+                }
             },
-            "model": {
-                "generation": "gemini-2.0-flash" if gemini_count > 0 else "fallback-templates",
-                "sentiment": SENTIMENT_MODEL
-            }
-        },
-        "rows": rows,
-        "aggregate": agg
-    }), 200
+            "rows": rows,
+            "aggregate": agg
+        }), 200
+
+    except Exception as e:
+        print("API analyze error:", e)
+        return jsonify({"error": str(e)}), 500
 
 # -----------------------
 # UI Route
@@ -245,4 +237,4 @@ def home():
 # -----------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "7860"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=True)  # debug=True for detailed error logs
