@@ -1,0 +1,209 @@
+:root{
+  --bg1:#0b1020;
+  --bg2:#111735;
+  --glass:rgba(255,255,255,0.06);
+  --border:rgba(255,255,255,0.12);
+  --text:#eaf2ff;
+  --muted:#b9c4e4;
+  --accent:#6ae3ff;
+  --accent2:#9b8cff;
+  --pos:#2ecc71;
+  --neg:#ff5c7a;
+  --neu:#ffd166;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  color:var(--text);
+  background: radial-gradient(1200px 800px at 70% -10%, #1a2255 0%, transparent 70%),
+              radial-gradient(800px 600px at -10% 110%, #2a1e5c 0%, transparent 70%),
+              linear-gradient(180deg, var(--bg1), var(--bg2));
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
+  overflow-x:hidden;
+}
+
+/* Background layers */
+.bg-gradient{
+  position:fixed; inset:0; pointer-events:none;
+  background:
+    radial-gradient(1000px 600px at 20% -10%, rgba(155,140,255,.25),transparent 60%),
+    radial-gradient(900px 500px at 110% 120%, rgba(106,227,255,.18),transparent 60%);
+  filter: blur(30px);
+}
+
+.stars, .shooting-stars{
+  position:fixed; inset:0; pointer-events:none; overflow:hidden; z-index:0;
+}
+.stars::before, .stars::after{
+  content:"";
+  position:absolute; inset:-200px;
+  background:
+    radial-gradient(2px 2px at 20% 30%, rgba(255,255,255,.8), transparent 70%),
+    radial-gradient(1.5px 1.5px at 70% 60%, rgba(255,255,255,.6), transparent 70%),
+    radial-gradient(1.5px 1.5px at 40% 80%, rgba(255,255,255,.6), transparent 70%),
+    radial-gradient(2px 2px at 85% 20%, rgba(255,255,255,.8), transparent 70%);
+  animation: twinkle 8s linear infinite alternate;
+}
+@keyframes twinkle{
+  from{opacity:.6; transform:scale(1)}
+  to{opacity:1; transform:scale(1.06)}
+}
+.shooting-stars::before{
+  content:"";
+  position:absolute;
+  top:-20vh; left:10vw; width:2px; height:2px; background:white;
+  box-shadow: 0 0 12px 3px rgba(255,255,255,.8);
+  transform: rotate(45deg);
+  animation: shoot 6s linear infinite;
+  opacity:.8;
+}
+@keyframes shoot{
+  0%{transform:translate(0,0) rotate(45deg); opacity:0}
+  5%{opacity:1}
+  70%{transform:translate(90vw,80vh) rotate(45deg); opacity:0}
+  100%{opacity:0}
+}
+
+/* planets */
+.planets{ position:fixed; inset:0; pointer-events:none; z-index:1;}
+.planet{
+  position:absolute; border-radius:50%; filter: blur(0.2px);
+  opacity:.8; animation: float 12s ease-in-out infinite;
+  background: radial-gradient(120px 120px at 40% 40%, rgba(255,255,255,.35), transparent 60%),
+              radial-gradient(circle at 60% 60%, rgba(255,255,255,.08), rgba(255,255,255,.02));
+  border:1px solid rgba(255,255,255,.1);
+}
+.p1{ width:140px; height:140px; top:12vh; left:8vw; background-color:#5b6cff;}
+.p2{ width:90px; height:90px; bottom:14vh; right:10vw; background-color:#35c0ff; animation-duration: 14s;}
+.p3{ width:65px; height:65px; top:60vh; left:20vw; background-color:#ff7ad6; animation-duration: 11s;}
+@keyframes float{
+  0%,100%{ transform: translateY(-8px)}
+  50%{ transform: translateY(8px)}
+}
+
+/* Parallax cursor */
+#parallax-cursor{ position:fixed; width:14px; height:14px; border-radius:50%;
+  background: radial-gradient(circle, rgba(255,255,255,.9), transparent 60%);
+  pointer-events:none; z-index:5; mix-blend-mode:screen; transform:translate(-50%,-50%);
+  opacity:.0; transition: opacity .25s ease;
+}
+
+/* Layout */
+.container{ width:min(1100px, 92%); margin: 0 auto; position:relative; z-index:2;}
+header{ padding: 60px 0 20px;}
+.logo{ font-size: clamp(28px, 6vw, 56px); font-weight:900; letter-spacing:.6px;}
+.logo span{
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  text-shadow: 0 0 28px rgba(106,227,255,.35);
+}
+.subtitle{ color:var(--muted); margin-top:10px; max-width: 780px; line-height:1.5 }
+
+.card{
+  background: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 22px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 15px 60px rgba(0,0,0,.35);
+  transform: translateY(6px);
+  animation: card-in .6s ease forwards;
+}
+@keyframes card-in{ to{ transform: translateY(0)} }
+
+.card-head{ display:flex; align-items:center; gap:12px; margin-bottom:12px;}
+.card-head .icon{
+  width:40px; height:40px; display:grid;place-items:center;
+  border-radius:12px; background:linear-gradient(135deg, var(--accent2), var(--accent));
+  box-shadow: 0 8px 26px rgba(155,140,255,.35);
+  font-weight:800;
+}
+.grid{ display:grid; grid-template-columns: 1fr auto; gap:12px; margin-top:16px;}
+.form-group{ display:flex; flex-direction:column; gap:8px}
+.form-group.col-span{ grid-column: 1 / -1}
+label{ color:var(--muted); font-size:14px}
+input{
+  background: rgba(255,255,255,.05); border:1px solid var(--border); color:var(--text);
+  padding:12px 14px; border-radius:12px; outline:none; transition:.2s;
+}
+input:focus{ border-color: var(--accent); box-shadow: 0 0 0 4px rgba(106,227,255,.18)}
+
+.btn{
+  position:relative; overflow:hidden; border:0; cursor:pointer;
+  padding: 12px 16px; border-radius:14px; color:#0b1020; font-weight:800;
+  background:linear-gradient(135deg, var(--accent), var(--accent2));
+  box-shadow: 0 10px 30px rgba(106,227,255,.35);
+}
+.btn .btn-glow{
+  position:absolute; inset:-80% -40%; background: radial-gradient(circle, rgba(255,255,255,.6), transparent 60%);
+  transform: translateX(-60%); animation: sweep 2.2s ease-in-out infinite;
+  opacity:.5;
+}
+@keyframes sweep{ 50%{ transform: translateX(60%)} }
+
+.status{ display:flex; gap:12px; align-items:center; margin-top:14px}
+.hidden{ display:none}
+.spinner{
+  width:20px; height:20px; border:2.5px solid rgba(255,255,255,.2); border-top-color:white; border-radius:50%;
+  animation: spin .9s linear infinite;
+}
+@keyframes spin{to{ transform:rotate(360deg)}}
+.dots::after{
+  content:""; animation: dots 1.2s steps(3,end) infinite;
+}
+@keyframes dots{ 0%{content:"."} 33%{content:".."} 66%{content:"..."} }
+
+.meta{ margin-top:14px; display:grid; grid-template-columns: repeat(3,1fr); gap:10px}
+.meta-item{ background: rgba(255,255,255,.04); border:1px solid var(--border); border-radius:12px; padding:12px}
+.meta-label{ color:var(--muted); font-size:12px}
+.meta-value{ margin-top:4px; display:flex; gap:8px; flex-wrap:wrap}
+
+.chip{
+  display:inline-flex; align-items:center; gap:6px;
+  border-radius:999px; padding:6px 10px; font-weight:700; font-size:12px; letter-spacing:.2px;
+  background: rgba(255,255,255,.07); border:1px solid var(--border)
+}
+.chip-gemini{ color:#00E5FF; border-color: rgba(0,229,255,.4)}
+.chip-fallback{ color:#ff9ff3; border-color: rgba(255,159,243,.4)}
+
+.charts{ display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:14px}
+.chart-card{ background: rgba(255,255,255,.04); border:1px solid var(--border); border-radius:12px; padding:10px}
+.chart-card h3{ margin:6px 6px 8px; font-size:14px; color:var(--muted)}
+
+.table-card{ margin-top:14px; background: rgba(255,255,255,.04); border:1px solid var(--border); border-radius:12px; overflow:hidden}
+.table-head{
+  display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-bottom:1px solid var(--border)
+}
+.table{ max-height: 360px; overflow:auto }
+.row{
+  display:grid; grid-template-columns: 1fr 110px 90px; gap:10px; padding:10px 12px;
+  border-bottom:1px dashed rgba(255,255,255,.08);
+  transition: background .2s ease, transform .12s ease;
+}
+.row:hover{ background: rgba(255,255,255,.03); transform: translateX(2px)}
+.cell{ font-size:14px; color:var(--text)}
+.badge{ padding:4px 10px; border-radius:999px; font-weight:800; font-size:12px}
+.badge.pos{ background: rgba(46,204,113,.15); color: var(--pos); border:1px solid rgba(46,204,113,.35)}
+.badge.neg{ background: rgba(255,92,122,.12); color: var(--neg); border:1px solid rgba(255,92,122,.35)}
+.badge.neu{ background: rgba(255,209,102,.12); color: var(--neu); border:1px solid rgba(255,209,102,.35)}
+
+.footer{ text-align:center; padding:26px 12px 60px; color:var(--muted)}
+.signature{ letter-spacing:.4px}
+.kavya{
+  background: linear-gradient(90deg, #fff, var(--accent), var(--accent2));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  text-shadow: 0 0 24px rgba(155,140,255,.45);
+}
+.heart{ filter: drop-shadow(0 0 10px rgba(255,150,200,.6)) }
+
+/* Responsive */
+@media (max-width: 900px){
+  .grid{ grid-template-columns: 1fr}
+  .charts{ grid-template-columns: 1fr}
+  .row{ grid-template-columns: 1fr 90px 80px}
+}
+
+/* subtle pop on hover */
+.btn:hover{ transform: translateY(-1px); }
