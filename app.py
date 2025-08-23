@@ -1,157 +1,248 @@
 import os
-import re
 import random
-import streamlit as st
-import pandas as pd
-import plotly.express as px
-from datetime import datetime, timezone
-from typing import List
+import time
+from typing import List, Dict
 
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline as hf_pipeline
+from flask import Flask, jsonify, request, render_template
+from flask_cors import CORS
 
-# ==========================
-# Session State
-# ==========================
-if "posts_df" not in st.session_state:
-    st.session_state.posts_df = pd.DataFrame(
-        columns=["text", "sentiment", "score", "timestamp", "source", "hashtag"]
-    )
+import google.generativeai as genai
+from transformers import pipeline
 
-# ==========================
-# Fake Streaming (Demo Mode)
-# ==========================
-def demo_post(tag: str) -> str:
-    demos = [
-        f"Absolutely loving AI today! Best decision ever ❤️ #{tag}",
-        f"Team AI all the way! Who's with me? 💪 #{tag}",
-        f"I hate the new AI change. Very buggy 😤 #{tag}",
-        f"Tried AI — neutral feelings overall. #{tag}",
-        f"Not sure about #{tag}, feels overhyped... 🤔",
-        f"AI disappointed me. Expected more. 😞 #{tag}",
-    ]
-    return random.choice(demos)
+# -----------------------
+# Flask setup
+# -----------------------
+app = Flask(__name__, static_folder="static", template_folder="templates")
+CORS(app)
 
-# ==========================
-# Clean Text
-# ==========================
-def clean_text(txt: str) -> str:
-    txt = re.sub(r"http\S+", "", txt)
-    txt = re.sub(r"@\w+", "", txt)
-    txt = re.sub(r"#\w+", "", txt)
-    return txt.strip()
+# -----------------------
+# Config & Environment
+# -----------------------
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
 
-# ==========================
-# Load Hugging Face Pipeline
-# ==========================
-MODEL_NAME = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+# Cap posts
+MAX_POSTS = 50
+DEFAULT_POSTS = 20
 
-@st.cache_resource(show_spinner=True)
-def load_hf_pipeline():
-    device = 0 if torch.cuda.is_available() else -1
-    tok = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
-    mdl = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-    pipe = hf_pipeline(
-        "text-classification",
-        model=mdl,
-        tokenizer=tok,
-        top_k=None,   # ✅ replaces old return_all_scores
-        device=device,
-    )
-    id2label = mdl.config.id2label
-    return pipe, id2label
+# -----------------------
+# Sentiment Analyzer (HF)
+# -----------------------
+# Pin a specific model for stability (avoid the production warning)
+SENTIMENT_MODEL = "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+sentiment_analyzer = pipeline(
+    "sentiment-analysis",
+    model=SENTIMENT_MODEL,
+    device=-1  # CPU
+)
 
-try:
-    pipe, id2label = load_hf_pipeline()
-except Exception:
-    pipe, id2label = None, {}
+# -----------------------
+# Helpers
+# -----------------------
+def normalize_count(n: int) -> int:
+    try:
+        n = int(n)
+    except Exception:
+        n = DEFAULT_POSTS
+    n = max(1, min(MAX_POSTS, n))
+    return n
 
-# ==========================
-# Sentiment Classification
-# ==========================
-def classify_texts(texts: List[str], pipe, id2label):
-    results = []
-    for t in texts:
+def parse_sentiment(label: str, score: float) -> Dict[str, str]:
+    # Standardize to POSITIVE / NEGATIVE / NEUTRAL (distilbert gives POSITIVE/NEGATIVE)
+    if label.upper() == "POSITIVE":
+        sentiment = "POSITIVE"
+    elif label.upper() == "NEGATIVE":
+        sentiment = "NEGATIVE"
+    else:
+        sentiment = "NEUTRAL"
+    return {"sentiment": sentiment, "score": float(score)}
+
+def compute_aggregate(rows: List[Dict]) -> Dict:
+    pos = sum(1 for r in rows if r["sentiment"] == "POSITIVE")
+    neg = sum(1 for r in rows if r["sentiment"] == "NEGATIVE")
+    neu = sum(1 for r in rows if r["sentiment"] == "NEUTRAL")
+
+    total = max(1, len(rows))
+    pos_pct = round(100 * pos / total, 2)
+    neg_pct = round(100 * neg / total, 2)
+    neu_pct = round(100 * neu / total, 2)
+
+    # Rolling sentiment (simple EMA-like)
+    rolling = []
+    score_map = {"POSITIVE": 1.0, "NEUTRAL": 0.5, "NEGATIVE": 0.0}
+    alpha = 0.2
+    ema = 0.5
+    for r in rows:
+        ema = alpha * score_map[r["sentiment"]] + (1 - alpha) * ema
+        rolling.append(round(ema, 3))
+
+    return {
+        "counts": {"positive": pos, "negative": neg, "neutral": neu, "total": total},
+        "percent": {"positive": pos_pct, "negative": neg_pct, "neutral": neu_pct},
+        "rolling": rolling,
+    }
+
+# -----------------------
+# Synthetic fallback posts (no external calls)
+# -----------------------
+FALLBACK_PATTERNS_POS = [
+    "Absolutely loving {tag} right now! 🔥",
+    "{tag} campaign is the best thing this season 🎉",
+    "I love {tag}! It's amazing ❤️",
+    "People are talking about {tag} everywhere 🌍",
+    "Super excited about {tag} 🙌",
+]
+FALLBACK_PATTERNS_NEG = [
+    "{tag} totally failed expectations 😠",
+    "I'm disappointed with {tag} 💔",
+    "{tag} needs serious improvements…",
+    "Not impressed by {tag} this time 😕",
+]
+FALLBACK_PATTERNS_NEU = [
+    "People are discussing {tag} a lot 🤔",
+    "Not sure how I feel about {tag} yet…",
+    "{tag} is trending — thoughts?",
+    "Mixed opinions around {tag}.",
+]
+
+def make_fallback_posts(hashtag: str, n: int) -> List[str]:
+    tag = hashtag if hashtag.startswith("#") else f"#{hashtag}"
+    posts = []
+    for _ in range(n):
+        bucket = random.choices(
+            [FALLBACK_PATTERNS_POS, FALLBACK_PATTERNS_NEU, FALLBACK_PATTERNS_NEG],
+            weights=[0.4, 0.35, 0.25],
+            k=1
+        )[0]
+        txt = random.choice(bucket).format(tag=tag)
+        posts.append(txt)
+    return posts
+
+# -----------------------
+# Gemini generation
+# -----------------------
+def generate_with_gemini(hashtag: str, n: int) -> List[str]:
+    """
+    Generate up to n short social posts using Gemini 2.0 Flash.
+    Returns list of strings. If API missing or error occurs, raises Exception.
+    """
+    if not GOOGLE_API_KEY:
+        raise RuntimeError("GOOGLE_API_KEY not set")
+
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    tag = hashtag if hashtag.startswith("#") else f"#{hashtag}"
+
+    prompt = f"""
+You are generating short, natural social posts (Twitter/Instagram style) about the topic {tag}.
+Rules:
+- Return exactly {n} posts.
+- One post per line.
+- Each post under 120 characters.
+- Use a mix of positive, neutral, and critical tones.
+- Avoid any hate speech, harassment, or slurs.
+- Do NOT include numbering like "1." or "-".
+- Do NOT wrap in code blocks.
+- Language: English.
+Output format:
+<post 1>
+<post 2>
+...
+<post {n}>
+"""
+
+    # Simple retry to avoid transient errors
+    tries = 2
+    for i in range(tries):
         try:
-            out = pipe(t, truncation=True)
-            best = out[0][0] if isinstance(out[0], list) else out[0]
-            label = id2label.get(best["label"], best["label"])
-            results.append({"label": label, "score": float(best["score"])})
-        except Exception:
-            results.append({"label": "NEUTRAL", "score": 0.0})
-    return results
+            r = model.generate_content(prompt)
+            text = (r.text or "").strip()
+            if not text:
+                raise RuntimeError("Empty response from Gemini")
 
-def numeric_score(r):
-    l = r["label"].upper()
-    if "POS" in l: 
-        return r["score"]
-    if "NEG" in l: 
-        return -r["score"]
-    return 0.0
+            lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+            # Keep only the first n lines; also handle if Gemini returns more or fewer lines
+            if len(lines) < n:
+                # pad with fallback to hit n
+                lines += make_fallback_posts(hashtag, n - len(lines))
+            posts = lines[:n]
+            return posts
+        except Exception as e:
+            if i == tries - 1:
+                raise
+            time.sleep(0.8)  # brief backoff
 
-# ==========================
-# Dashboard
-# ==========================
-def dashboard():
-    st.title("🚀 Social Media Sentiment Analyzer")
-    st.caption("Transformer pipeline + rolling sentiment stats")
+# -----------------------
+# API: analyze
+#   Request JSON:
+#     { "hashtag": "gla", "count": 30 }
+# -----------------------
+@app.route("/api/analyze", methods=["POST"])
+def analyze():
+    data = request.get_json(silent=True) or {}
+    hashtag = (data.get("hashtag") or "").strip()
+    count = normalize_count(data.get("count") or DEFAULT_POSTS)
 
-    hashtag = st.sidebar.text_input("Hashtag / Keyword", "AI")
-    window_size = st.sidebar.slider("Window size", 10, 200, 50)
+    if not hashtag:
+        return jsonify({"error": "hashtag is required"}), 400
 
-    # 🔄 Stream new posts (demo for now)
-    texts = [demo_post(hashtag) for _ in range(5)]
+    posts: List[Dict] = []
+    gemini_count = 0
+    fallback_count = 0
 
-    if pipe:
-        cleaned = [clean_text(t) for t in texts]
-        results = classify_texts(cleaned, pipe, id2label)
-        rows = []
-        for t, r in zip(texts, results):
-            rows.append({
-                "timestamp": datetime.now(timezone.utc),
-                "text": t,
-                "sentiment": r["label"],
-                "score": numeric_score(r),
-                "source": "demo",
-                "hashtag": hashtag,
-            })
-        df = pd.DataFrame(rows)
-        st.session_state.posts_df = pd.concat([st.session_state.posts_df, df], ignore_index=True)
+    # Try Gemini first; if it fails, fall back fully.
+    try:
+        gemini_posts = generate_with_gemini(hashtag, count)
+        for p in gemini_posts:
+            posts.append({"text": p, "source": "gemini"})
+        gemini_count = len(gemini_posts)
+    except Exception:
+        fb = make_fallback_posts(hashtag, count)
+        for p in fb:
+            posts.append({"text": p, "source": "fallback"})
+        fallback_count = len(fb)
 
-    # Keep only last N posts
-    st.session_state.posts_df = st.session_state.posts_df.tail(window_size)
+    # Sentiment analysis
+    rows = []
+    for p in posts:
+        res = sentiment_analyzer(p["text"])[0]  # {'label': 'POSITIVE', 'score': 0.99}
+        parsed = parse_sentiment(res["label"], res["score"])
+        rows.append({
+            "text": p["text"],
+            "source": p["source"],
+            "sentiment": parsed["sentiment"],
+            "score": parsed["score"],
+        })
 
-    # =====================
-    # Stats
-    # =====================
-    total = len(st.session_state.posts_df)
-    pos = (st.session_state.posts_df["score"] > 0).mean() if total else 0
-    neg = (st.session_state.posts_df["score"] < 0).mean() if total else 0
-    neu = 1 - pos - neg if total else 0
+    agg = compute_aggregate(rows)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total", total)
-    c2.metric("😊 Positive", f"{pos*100:.1f}%")
-    c3.metric("😐 Neutral", f"{neu*100:.1f}%")
-    c4.metric("☹️ Negative", f"{neg*100:.1f}%")
+    return jsonify({
+        "meta": {
+            "hashtag": hashtag if hashtag.startswith("#") else f"#{hashtag}",
+            "requested": count,
+            "generated_by": {
+                "gemini": gemini_count,
+                "fallback": fallback_count
+            },
+            "model": {
+                "generation": "gemini-2.0-flash" if gemini_count > 0 else "fallback-templates",
+                "sentiment": SENTIMENT_MODEL
+            }
+        },
+        "rows": rows,
+        "aggregate": agg
+    }), 200
 
-    # =====================
-    # Graphs
-    # =====================
-    if total > 0:
-        st.plotly_chart(
-            px.line(st.session_state.posts_df, x="timestamp", y="score", title="📈 Sentiment Over Time"),
-            use_container_width=True
-        )
-        st.plotly_chart(
-            px.pie(st.session_state.posts_df, names="sentiment", title="🍩 Sentiment Distribution"),
-            use_container_width=True
-        )
+# -----------------------
+# UI Route
+# -----------------------
+@app.route("/", methods=["GET"])
+def home():
+    return render_template("index.html")
 
-        st.markdown("### 💬 Recent Posts")
-        for _, row in st.session_state.posts_df.tail(5).iloc[::-1].iterrows():
-            st.write(f"**{row['sentiment']} ({row['score']:.2f})** • {row['timestamp']}")
-            st.caption(row["text"])
-
+# -----------------------
+# Entrypoint
+# -----------------------
 if __name__ == "__main__":
-    dashboard()
+    port = int(os.getenv("PORT", "7860"))
+    app.run(host="0.0.0.0", port=port, debug=False)
